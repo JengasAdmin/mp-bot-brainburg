@@ -1,0 +1,527 @@
+// Prisma-схема системы отдела организаторов МП Arizona.
+// SQLite не поддерживает enum и Json — статусы хранятся как строки,
+// структурированные данные (варианты ответов, metadata) как JSON-строки.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Настройки сервера: ID каналов/ролей, параметры системы. Источник истины — БД.
+model GuildSettings {
+  id             Int      @id @default(autoincrement())
+  guildId        String   @unique
+  setupComplete  Boolean  @default(false)
+  setupAt        DateTime?
+  // Каналы
+  announcementsChannelId String?
+  rulesChannelId         String?
+  regulationsChannelId   String?
+  learningChannelId      String?
+  faqChannelId           String?
+  ideasChannelId         String?
+  applicationsChannelId  String?
+  reviewChannelId        String?
+  planningChannelId      String?
+  activeChannelId        String?
+  statsChannelId         String?
+  achievementsChannelId  String?
+  rosterChannelId        String?
+  internshipChannelId    String?
+  testingChannelId       String?
+  promotionsChannelId    String?
+  disciplineChannelId    String?
+  logsChannelId          String?
+  settingsChannelId      String?
+  commandsChannelId      String?
+  // Анонсы МП: канал на сервере организаторов (тест) либо webhook официального сервера.
+  // Если задан announceWebhookUrl — анонсы уходят туда, иначе в announceChannelId.
+  announceChannelId      String?
+  announceWebhookUrl     String?
+  // Голосовые
+  voiceGeneralId         String?
+  voiceOrganizersId      String?
+  voiceEventsId          String?
+  voiceLeadershipId      String?
+  voicePrivateId         String?
+  // Роли
+  roleMainAdminId        String?
+  roleCuratorId          String?
+  roleHeadOrganizerId    String?
+  roleSeniorOrganizerId  String?
+  roleOrganizerId        String?
+  roleAssistantId        String?
+  roleTestAccessId       String?
+  roleTestPassedId       String?
+  roleDostupId           String?
+  roleBotId              String?
+  // Параметры системы (настраиваемо, не хардкод)
+  testPassScore          Int      @default(70) // проходной балл, %
+  testAttemptsLimit      Int      @default(3)
+  reportDeadlineHours    Int      @default(24) // срок сдачи отчёта после завершения
+  archiveAfterDays       Int      @default(7)  // автоархив после отчёта
+  voiceDeleteDelayMin    Int      @default(30) // удаление voice-канала после завершения
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+/// Сотрудник отдела. Discord ID — первичный ключ.
+model User {
+  discordId     String    @id
+  username      String
+  nickname      String?
+  position      String    @default("GUEST") // IMPORTANCE-тир из permissions
+  joinedAt      DateTime  @default(now())
+  leftAt        DateTime?
+  internStartedAt DateTime?
+  mentorId      String?
+
+  authoredEvents    Event[]          @relation("EventAuthor")
+  organizedEvents   Event[]          @relation("EventOrganizer")
+  staffAssignments  EventStaff[]
+  reports           EventReport[]
+  achievements      UserAchievement[]
+  warnings          Warning[]
+  attempts          TestAttempt[]
+  statusChanges     EventStatusHistory[]
+  auditLogs         AuditLog[]       @relation("AuditActor")
+}
+
+/// Категории МП — расширяемые, хранятся в БД, не хардкод.
+model EventCategory {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  name      String
+  emoji     String   @default("🎲")
+  channelId String?  // тематический канал категории, если создан
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  events Event[]
+
+  @@unique([guildId, name])
+}
+
+/// Мероприятие (заявка → МП → архив — единая сущность в разных статусах).
+model Event {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique // MP-0001
+  guildId   String
+  title     String
+  categoryId Int
+  authorId  String
+  organizerId String?
+  description String
+  rules     String?
+  scheduledAt DateTime  // дата + время проведения
+  durationMinutes Int   @default(60)
+  participantsPlanned Int @default(20)
+  location  String?
+  extraInfo String?
+  status    String   @default("PENDING")
+  // Discord-привязки
+  reviewMessageId   String?
+  eventChannelId    String?
+  eventMessageId    String?
+  voiceChannelId    String?
+  applicationChannelId String?
+  // Анонс в канале announcements: messageId позволяет обновлять счётчик записей
+  announceChannelId String?
+  announceMessageId String?
+  // История согласования
+  approvedById String?
+  approvedAt   DateTime?
+  rejectedById String?
+  rejectedAt   DateTime?
+  rejectReason String?
+  revisionReason String?
+  cancelledById  String?
+  cancelledAt    DateTime?
+  cancelReason   String?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  reportedAt     DateTime?
+  archivedAt     DateTime?
+  reportDueAt    DateTime?
+  // Планировщик: защита от повторных уведомлений (состояние в БД, переживает рестарт)
+  upcomingNotifiedAt DateTime?
+  pingNotifiedAt DateTime?
+  reportReminderCount Int @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  category EventCategory @relation(fields: [categoryId], references: [id])
+  author   User @relation("EventAuthor", fields: [authorId], references: [discordId])
+  organizer User? @relation("EventOrganizer", fields: [organizerId], references: [discordId])
+  staff    EventStaff[]
+  report   EventReport?
+  statusHistory EventStatusHistory[]
+  applications Application[]
+  applicationChannel ApplicationChannel?
+  signups     EventSignup[]
+  checklist   ChecklistItem[]
+  voiceSessions VoiceSession[]
+  feedback    EventFeedback[]
+  materials   EventMaterial[]
+
+  @@index([guildId, status])
+  @@index([scheduledAt])
+  @@index([reportDueAt])
+}
+
+/// Заявка на МП: каждая отправка/повторная отправка — отдельная запись,
+/// статусная история согласования хранится здесь и в EventStatusHistory.
+model Application {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  attempt   Int      @default(1)
+  authorId  String
+  status    String   @default("PENDING") // PENDING | REVISION | APPROVED | REJECTED
+  reviewerId String?
+  reviewComment String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+  @@index([authorId])
+}
+
+/// Команда мероприятия (организатор + помощники).
+model EventStaff {
+  id      Int    @id @default(autoincrement())
+  eventId Int
+  userId  String
+  role    String @default("HELPER") // ORGANIZER | HELPER
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [discordId])
+
+  @@unique([eventId, userId])
+}
+
+/// Отчёт по завершённому МП.
+model EventReport {
+  id        Int      @id @default(autoincrement())
+  eventId   Int      @unique
+  participantsActual Int
+  durationActualMinutes Int
+  result    String
+  problems  String?
+  comment   String?
+  suggestions String?
+  materials String?
+  createdById String
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [createdById], references: [discordId])
+}
+
+/// История смены статусов мероприятия.
+model EventStatusHistory {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  fromStatus String?
+  toStatus  String
+  actorId   String?
+  reason    String?
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [discordId])
+}
+
+/// Тест на должность организатора.
+model Test {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  title     String
+  description String?
+  passScore Int      @default(70)
+  attemptsLimit Int  @default(3)
+  grantRoleId String? // роль, выдаваемая при успешной сдаче
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  questions TestQuestion[]
+  attempts  TestAttempt[]
+}
+
+/// Вопрос теста. options — JSON-строка массива строк.
+model TestQuestion {
+  id        Int      @id @default(autoincrement())
+  testId    Int
+  text      String
+  options   String // JSON: ["вариант1", "вариант2", ...]
+  correctIndex Int
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  test Test @relation(fields: [testId], references: [id], onDelete: Cascade)
+}
+
+/// Попытка прохождения теста. answers/currentIndex позволяют восстановить
+/// прохождение после перезапуска бота.
+model TestAttempt {
+  id        Int      @id @default(autoincrement())
+  testId    Int
+  userId    String
+  questionIds String // JSON: порядок вопросов варианта
+  answers   String   @default("[]") // JSON: индексы ответов
+  currentIndex Int    @default(0)
+  score     Int?
+  total     Int
+  passed    Boolean?
+  status    String   @default("IN_PROGRESS") // IN_PROGRESS | FINISHED
+  startedAt DateTime @default(now())
+  finishedAt DateTime?
+  messageChannelId String?
+  messageId String?
+
+  test Test @relation(fields: [testId], references: [id])
+  user User  @relation(fields: [userId], references: [discordId])
+}
+
+/// Достижения — расширяемая система, критерии в БД.
+model Achievement {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  title     String
+  description String
+  emoji     String   @default("🏆")
+  metric    String   // EVENTS_COMPLETED | PARTICIPANTS_TOTAL | REPORTS | TEST_PASSED
+  threshold Int
+  active    Boolean  @default(true)
+
+  users UserAchievement[]
+}
+
+model UserAchievement {
+  id            Int      @id @default(autoincrement())
+  userId        String
+  achievementId Int
+  awardedAt     DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [discordId])
+  achievement Achievement  @relation(fields: [achievementId], references: [id])
+
+  @@unique([userId, achievementId])
+}
+
+/// Предупреждения и выговоры.
+model Warning {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  userId    String
+  type      String   @default("WARNING") // WARNING | REPRIMAND
+  reason    String
+  issuedById String
+  active    Boolean  @default(true)
+  expiresAt DateTime?
+  removedById String?
+  removedAt DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [discordId])
+}
+
+/// Журнал аудита. Discord-канал логов — зеркало, БД — источник истины.
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  action    String
+  actorId   String?
+  actorTag  String?
+  targetType String?
+  targetId  String?
+  oldValue  String?
+  newValue  String?
+  reason    String?
+  metadata  String?  // JSON
+  createdAt DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [discordId])
+
+  @@index([guildId, createdAt])
+  @@index([action])
+}
+
+/// Закреплённые сообщения-борда (планирование, активные МП, статистика).
+model BoardMessage {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  key       String // PLANNING | ACTIVE | STATS
+  channelId String
+  messageId String
+  updatedAt DateTime @updatedAt
+
+  @@unique([guildId, key])
+}
+
+/// Стажировка помощников.
+model Internship {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  userId    String
+  mentorId  String
+  status    String   @default("ACTIVE") // ACTIVE | COMPLETED | TERMINATED
+  startedAt DateTime @default(now())
+  finishedAt DateTime?
+  note      String?
+
+  @@unique([guildId, userId, status])
+}
+
+/// Рейтинг организаторов: очки за проведённые МП.
+/// period: WEEKLY | MONTHLY | ALL_TIME
+model OrganizerRating {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  userId    String
+  period    String   @default("ALL_TIME")
+  points    Int      @default(0)
+  eventsCompleted Int @default(0)
+  reportsOnTime  Int @default(0)
+  reportsLate    Int @default(0)
+  lastCalculatedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([guildId, userId, period])
+  @@index([guildId, period, points])
+}
+
+/// Шаблон мероприятия: сохранённый сценарий для быстрого создания МП.
+model EventTemplate {
+  id        Int      @id @default(autoincrement())
+  guildId   String
+  name      String
+  categoryId Int
+  description String
+  rules     String?
+  durationMinutes Int   @default(60)
+  participantsPlanned Int @default(20)
+  location  String?
+  extraInfo String?
+  usageCount Int     @default(0)
+  createdById String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([guildId, active])
+}
+
+/// Приватный канал заявки: создаётся для каждой заявки, видим только автору и главному организатору.
+model ApplicationChannel {
+  id        Int      @id @default(autoincrement())
+  eventId   Int      @unique
+  channelId String
+  guildId   String
+  authorId  String
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([guildId])
+}
+
+/// Запись участника на МП (кнопка «✅ Буду» в анонсе).
+model EventSignup {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  userId    String
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+}
+
+/// Пункт чек-листа подготовки МП. auto=true — заполняется ботом
+/// (каналы созданы, анонс опубликован и т.п.), иначе отмечается вручную.
+model ChecklistItem {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  key       String
+  label     String
+  auto      Boolean  @default(false)
+  done      Boolean  @default(false)
+  doneById  String?
+  doneAt    DateTime?
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, key])
+}
+
+/// Сессия участия в голосовом канале МП (учёт посещаемости по voiceStateUpdate).
+model VoiceSession {
+  id       Int      @id @default(autoincrement())
+  eventId  Int
+  userId   String
+  joinedAt DateTime @default(now())
+  leftAt   DateTime?
+  minutes  Int      @default(0)
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, userId])
+  @@index([eventId, leftAt])
+}
+
+/// Оценка МП участником (1–5 звёзд + комментарий).
+model EventFeedback {
+  id        Int      @id @default(autoincrement())
+  eventId   Int
+  userId    String
+  score     Int
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+  @@index([eventId])
+}
+
+/// Материал для игр: вопросы, темы, сценарии — общая база отдела.
+model Material {
+  id         Int      @id @default(autoincrement())
+  guildId    String
+  title      String
+  categoryId Int?     // категория МП (NULL — материал для любых категорий)
+  body       String
+  tags       String   @default("") // теги через запятую, для поиска
+  usageCount Int      @default(0)
+  createdById String
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  events EventMaterial[]
+
+  @@index([guildId, active])
+}
+
+/// Привязка материала к мероприятию (прикреплённые материалы в карточке МП).
+model EventMaterial {
+  id         Int      @id @default(autoincrement())
+  eventId    Int
+  materialId Int
+  addedById  String?
+  addedAt    DateTime @default(now())
+
+  event    Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  material Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, materialId])
+}
